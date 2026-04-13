@@ -11,9 +11,9 @@ class Dino(torch.nn.Module):
     def __init__(
         self,
         input_size: int = 224,
-        repo_or_dir: str = "facebookresearch/dinov2",
+        repo_or_dir: str = "/home/user/datas/hc/data/ckpts/dinov2_repo",
         dino_model: str = "dinov2_vitb14",
-        source: str = "github",
+        source: str = "local",
         backbone_kwargs: Optional[Dict[str, Any]] = None,
         normalize_images: bool = True,
         # for backward compatible

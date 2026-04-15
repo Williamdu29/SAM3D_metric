@@ -6,6 +6,8 @@
 
 This project implements an **anchor-driven metric-scale recovery pipeline** inspired by **Any6D**.
 
+All the updated and useful code is in **metric_V1** foldder. Check `README_V1.md` for help.
+
 The core idea is:
 1. Recover a **visible point cloud with real physical size** from a single **RGB-D anchor image**.
 2. Use **SAM3D** to generate a **normalized full-object point cloud**.

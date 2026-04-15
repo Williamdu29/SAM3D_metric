@@ -364,9 +364,9 @@ So, in the current version, **metric-scale recovery happens mainly at the point-
 
 | Object | Ground Truth Size | Reconstruction Time |
 |---|---|---:|
-| Pretz | 16.0 × 8.4 × 2.5 | 65 s |
-| Sea Salt Soda Crackers | 18.8 × 9.0 × 7.1 | 68.4 s |
-| Vitasoy | 10.5 × 6.3 × 4.0 | 64 s |
+| Pretz | 16.0 × 8.4 × 2.5 | - |
+| Sea Salt Soda Crackers | 18.8 × 9.0 × 7.1 | - |
+| Vitasoy | 10.5 × 6.3 × 4.0 | - |
 | Oreo | 21.0 × 5.5 × 4.8 | — |
 | Tissue Pack | 8.2 × 6.5 | — |
 | Mobile Phone | 16.3 × 8.0 | — |

@@ -6,6 +6,9 @@ import cv2
 import numpy as np
 import open3d as o3d
 from PIL import Image
+import time
+import torch
+import psutil
 
 # ============================================================
 # Config
@@ -761,6 +764,27 @@ def align_mesh_to_origin_and_axes(mesh):
     return mesh, axes, bbox_center
 
 
+def print_gpu_mem(tag=""):
+    if not torch.cuda.is_available():
+        print(f"[{tag}] CUDA not available")
+        return
+    torch.cuda.synchronize()
+    alloc = torch.cuda.memory.max_memory_allocated() / 1024**3
+    reserv = torch.cuda.memory.max_memory_reserved() / 1024**3
+    now_alloc = torch.cuda.memory.memory_allocated() / 1024**3
+    now_reserv = torch.cuda.memory.memory_reserved() / 1024**3
+    print(f"[{tag}] GPU now allocated   = {now_alloc:.2f} GB")
+    print(f"[{tag}] GPU now reserved    = {now_reserv:.2f} GB")
+    print(f"[{tag}] GPU peak allocated  = {alloc:.2f} GB")
+    print(f"[{tag}] GPU peak reserved   = {reserv:.2f} GB")
+
+def print_ram_mem(tag=""):
+    vm = psutil.virtual_memory()
+    used = (vm.total - vm.available) / 1024**3
+    total = vm.total / 1024**3
+    print(f"[{tag}] RAM used            = {used:.2f} / {total:.2f} GB")
+
+
 
 def main():
     anchor_path = os.path.join(OUT_DIR, "anchor_metric_visible_surface_v8.ply") # 锚点的PLY文件路径，包含从RGB-D数据构建的锚点点云，通常用于后续的对齐和评估步骤
@@ -774,6 +798,13 @@ def main():
     out_metric_mesh_ply = os.path.join(OUT_DIR, "sam3d_metric_general_mesh.ply") # SAM3D度量对齐后的网格的PLY文件路径，包含经过尺度和位姿调整后的SAM3D网格数据，通常用于后续的评估和可视化步骤
 
     out_metric_mesh_obj = os.path.join(OUT_DIR, "sam3d_metric_general_mesh.obj") # SAM3D度量对齐后的网格的OBJ文件路径，包含经过尺度和位姿调整后的SAM3D网格数据，通常用于后续的评估和可视化步骤
+
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+    print_gpu_mem("start")
+    print_ram_mem("start")
 
     print("[1/6] Build anchor data from RGB-D...")
     anchor_data = build_anchor_data(RGB_PATH, DEPTH_PATH, MASK_PATH, K_PATH) # 返回一个包含从RGB-D数据构建的锚点数据的字典，包括RGB图像、深度图像、掩码图像、相机内参、点云坐标、尺度目标等信息，这些信息用于后续的对齐和评估步骤
@@ -792,10 +823,19 @@ def main():
     print("  target height [m]                  =", st["metric_h"]) # 锚点所在对象的实际高度，通常用于后续的尺度调整和对齐步骤
     print("  anchor visible XY extent [m]       =", anchor_data["anchor_xy_extent"]) # 锚点的可见XY范围，表示锚点所在对象在XY平面上的范围，通常用于后续的尺度调整和对齐步骤
 
+    print_gpu_mem("after_anchor")
+    print_ram_mem("after_anchor")
+
+
     print("\n[2/6] Run or load SAM3D...")
     if RUN_SAM3D or (not os.path.exists(raw_sam_path)):
         run_sam3d(RGB_PATH, MASK_PATH, SAM3D_CONFIG, raw_sam_path) # 先运行SAM3D模型来生成原始点云数据
     print("SAM3D raw point cloud:", raw_sam_path)
+
+    print_gpu_mem("after_sam3d")
+    print_ram_mem("after_sam3d")
+
+
     sam_pcd = load_pcd(raw_sam_path) # 加载SAM3D原始点云数据，返回一个Open3D点云对象
 
     print("\n[3/6] Solve metric scale from FULL cloud width/height, then refine rigid pose...")
@@ -826,6 +866,9 @@ def main():
     print("  ICP rmse                           =", best["rmse"])
     print("  final score                        =", best["score"])
 
+    print_gpu_mem("after_alignment")
+    print_ram_mem("after_alignment")
+
     print("\n[4/6] Save metric point clouds...")
     metric_pcd = np_to_pcd(best["full_final"])
     metric_vis_pcd = np_to_pcd(best["visible_final"])
@@ -846,6 +889,9 @@ def main():
     save_mesh(out_metric_mesh_obj, mesh)
     print("Saved metric mesh (PLY):", out_metric_mesh_ply)
     print("Saved metric mesh (OBJ):", out_metric_mesh_obj)
+
+    print_gpu_mem("after_mesh")
+    print_ram_mem("after_mesh")
 
     print("\n[6/6] Save metrics...")
     np.save(

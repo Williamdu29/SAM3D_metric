@@ -1,13 +1,15 @@
 import os
 
+os.environ["SAM3D_COMPILE_MODEL"] = "0"
+
 from sam3D_class_V1 import SAM3DReconstructor
 
 # ============================================================
 # Input paths
 # ============================================================
-RGB_PATH = "/mnt/ws_shard/dct/SKU/ice_tea/image/1775209506830.jpg"
-DEPTH_PATH = "/mnt/ws_shard/dct/SKU/ice_tea/depth/1775209506830.png"
-MASK_PATH = "/mnt/ws_shard/dct/SKU/ice_tea/masks/maskdata/20260407_112555.png"
+RGB_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302.jpg"
+DEPTH_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302_depth.png"
+MASK_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302.png"
 K_INPUT = [
     384.897491455078, 0.0, 326.897308349609,
     0.0, 384.471374511719, 240.425384521484,
@@ -28,11 +30,11 @@ reconstructor = SAM3DReconstructor(
     sam3d_root=SAM3D_ROOT,
     sam3d_config=SAM3D_CONFIG,
     out_dir=None,
-    voxel_size=0.0025,
+    voxel_size=0.003,
     icp_max_iter=40,
     mesh_poisson_depth=8,
     mesh_density_q=0.02,
-    sam_compile=False,   # 如需 compile=True 可自行打开
+    sam_compile=False,
     verbose=True,
 )
 

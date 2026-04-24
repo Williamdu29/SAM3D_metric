@@ -98,6 +98,8 @@ class InferencePipelinePointMap(InferencePipeline):
         self.layout_post_optimization_method_GS = layout_post_optimization_method_GS
         self.clip_pointmap_beyond_scale = clip_pointmap_beyond_scale
         super().__init__(*args, **kwargs)
+        if self.depth_model is not None and self.depth_model.device.type == "cpu":
+            self.depth_model.promote_to_pipeline_device(self.device)
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64
@@ -422,6 +424,7 @@ class InferencePipelinePointMap(InferencePipeline):
                 inference_steps=stage1_inference_steps,
                 use_distillation=use_stage1_distillation,
             )
+            self._release_cross_attn_kv_cache_safe()
 
             # We could probably use the decoder from the models themselves
             pointmap_scale = ss_input_dict.get("pointmap_scale", None)
@@ -454,6 +457,7 @@ class InferencePipelinePointMap(InferencePipeline):
                 inference_steps=stage2_inference_steps,
                 use_distillation=use_stage2_distillation,
             )
+            self._release_cross_attn_kv_cache_safe()
             outputs = self.decode_slat(
                 slat, self.decode_formats if decode_formats is None else decode_formats
             )

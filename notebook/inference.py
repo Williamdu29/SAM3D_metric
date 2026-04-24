@@ -86,7 +86,11 @@ class Inference:
         # load inference pipeline
         config = OmegaConf.load(config_file)
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
-        config.compile_model = compile
+        compile_flag = bool(compile)
+        _env = os.environ.get("SAM3D_COMPILE_MODEL", "").strip().lower()
+        if _env in ("0", "false", "no", "off"):
+            compile_flag = False
+        config.compile_model = compile_flag
         config.workspace_dir = os.path.dirname(config_file)
         check_hydra_safety(config, WHITELIST_FILTERS, BLACKLIST_FILTERS)
         self._pipeline: InferencePipelinePointMap = instantiate(config)

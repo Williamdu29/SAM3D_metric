@@ -346,7 +346,17 @@ class SLatFlowModelTdfyWrapper(SLatFlowModel):
         if self.force_zeros_cond and cfg_activate:
             # TODO: @weiyaowang, refactor to read directly from embedder
             cond = self.condition_embedder(*condition_args, **condition_kwargs)
-            cond = cond * 0
+            # Reuse a persistent zero tensor so cross-attn K/V cache can hit
+            # across all CFG-uncond calls within a single inference run.
+            zc = getattr(self, "_cached_zero_cond", None)
+            if (
+                zc is None
+                or zc.shape != cond.shape
+                or zc.dtype != cond.dtype
+                or zc.device != cond.device
+            ):
+                self._cached_zero_cond = torch.zeros_like(cond)
+            cond = self._cached_zero_cond
         else:
             cond = self.condition_embedder(*condition_args, **condition_kwargs)
         h = super().forward(x, t, cond, d)

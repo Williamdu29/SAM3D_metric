@@ -88,6 +88,13 @@ class SparseMultiHeadAttention(nn.Module):
         if use_rope:
             self.rope = RotaryPositionEmbedder(channels)
 
+        # Cross-attention K/V cache. Toggled by `cross_attn_kv_cache`
+        # context manager in the pipeline. Cached by id(context) with a
+        # bounded dictionary so it cannot leak between inference runs.
+        self._ca_cache_enabled: bool = False
+        self._ca_cache: Dict[int, torch.Tensor] = {}
+        self._ca_cache_max: int = 4
+
     @staticmethod
     def _linear(
         module: nn.Linear, x: Union[SparseTensor, torch.Tensor]
@@ -122,6 +129,27 @@ class SparseMultiHeadAttention(nn.Module):
         qkv = qkv.replace(torch.stack([q, k, v], dim=1))
         return qkv
 
+    def _cross_to_kv(
+        self, context: Union[SparseTensor, torch.Tensor]
+    ) -> Union[SparseTensor, torch.Tensor]:
+        """to_kv with optional context-identity cache for cross-attention."""
+        if not self._ca_cache_enabled:
+            return self._linear(self.to_kv, context)
+        if isinstance(context, SparseTensor):
+            # Caching SparseTensor is awkward (wrappers change identity),
+            # skip caching for sparse contexts.
+            return self._linear(self.to_kv, context)
+        key = id(context)
+        cached = self._ca_cache.get(key)
+        if cached is not None and cached.shape[:2] == context.shape[:2]:
+            return cached
+        kv = self._linear(self.to_kv, context)
+        if len(self._ca_cache) >= self._ca_cache_max:
+            oldest_key = next(iter(self._ca_cache))
+            self._ca_cache.pop(oldest_key, None)
+        self._ca_cache[key] = kv
+        return kv
+
     def forward(
         self,
         x: Union[SparseTensor, torch.Tensor],
@@ -154,7 +182,7 @@ class SparseMultiHeadAttention(nn.Module):
         else:
             q = self._linear(self.to_q, x)
             q = self._reshape_chs(q, (self.num_heads, -1))
-            kv = self._linear(self.to_kv, context)
+            kv = self._cross_to_kv(context)
             kv = self._fused_pre(kv, num_fused=2)
             if self.qk_rms_norm:
                 q = self.q_rms_norm(q)

@@ -135,6 +135,29 @@ class MultiHeadAttention(nn.Module):
         if use_rope:
             self.rope = RotaryPositionEmbedder(channels)
 
+        # Cross-attention K/V cache. Keyed by id(context) with bounded size.
+        # Only used when `_ca_cache_enabled` is True, which is toggled by
+        # `cross_attn_kv_cache` context manager in the pipeline. Avoids stale
+        # state leaking across inference runs.
+        self._ca_cache_enabled: bool = False
+        self._ca_cache: Dict[int, torch.Tensor] = {}
+        self._ca_cache_max: int = 4
+
+    def _cross_to_kv(self, context: torch.Tensor) -> torch.Tensor:
+        """to_kv with optional context-identity cache for cross-attention."""
+        if not self._ca_cache_enabled:
+            return self.to_kv(context)
+        key = id(context)
+        cached = self._ca_cache.get(key)
+        if cached is not None and cached.shape[:2] == context.shape[:2]:
+            return cached
+        kv = self.to_kv(context)
+        if len(self._ca_cache) >= self._ca_cache_max:
+            oldest_key = next(iter(self._ca_cache))
+            self._ca_cache.pop(oldest_key, None)
+        self._ca_cache[key] = kv
+        return kv
+
     def forward(
         self,
         x: torch.Tensor,
@@ -162,7 +185,7 @@ class MultiHeadAttention(nn.Module):
         else:
             Lkv = context.shape[1]
             q = self.to_q(x)
-            kv = self.to_kv(context)
+            kv = self._cross_to_kv(context)
             q = q.reshape(B, L, self.num_heads, -1)
             kv = kv.reshape(B, Lkv, 2, self.num_heads, -1)
             if self.qk_rms_norm:

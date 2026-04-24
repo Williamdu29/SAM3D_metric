@@ -34,7 +34,7 @@ class SAM3DReconstructor:
         sam3d_root,
         sam3d_config,
         out_dir=None,
-        voxel_size=0.0025,
+        voxel_size=0.003,
         icp_max_iter=40,
         mesh_poisson_depth=8,
         mesh_density_q=0.02,
@@ -59,6 +59,13 @@ class SAM3DReconstructor:
         # 关键：必须先初始化，再用 _timer
         self.init_timings = {}
         self.total_timings = {}
+
+        _repo_root = os.path.abspath(self.sam3d_root)
+        try:
+            sys.path.remove(_repo_root)
+        except ValueError:
+            pass
+        sys.path.insert(0, _repo_root)
 
         notebook_dir = os.path.join(self.sam3d_root, "notebook")
         if notebook_dir not in sys.path:
@@ -118,7 +125,17 @@ class SAM3DReconstructor:
     def run_sam3d(self, rgb_path, mask_path, save_path, seed=42):
         image = self.load_image(rgb_path)
         mask = self.load_mask(mask_path)
-        output = self.inference(image, mask, seed=seed)
+        try:
+            from sam3d_objects.model.backbone.tdfy_dit.modules.attention.ca_cache import (
+                cross_attn_kv_cache,
+            )
+            ca_ctx = cross_attn_kv_cache(self.inference._pipeline, verbose=self.verbose)
+        except Exception:
+            from contextlib import nullcontext
+            ca_ctx = nullcontext()
+
+        with ca_ctx:
+            output = self.inference(image, mask, seed=seed)
         output["gs"].save_ply(save_path)
         return save_path
 
@@ -475,11 +492,14 @@ class SAM3DReconstructor:
         vis = pcd.select_by_index(visible_idx)
         return self.pcd_to_np(vis)
 
-    def compute_symmetric_chamfer(self, src_pts, tgt_pts):
-        src = self.np_to_pcd(src_pts)
-        tgt = self.np_to_pcd(tgt_pts)
-        d1 = np.asarray(src.compute_point_cloud_distance(tgt), dtype=np.float64)
-        d2 = np.asarray(tgt.compute_point_cloud_distance(src), dtype=np.float64)
+    def compute_symmetric_chamfer(self, src_pts, tgt_pts, src_pcd=None, tgt_pcd=None):
+        """对称 chamfer 距离。"""
+        if src_pcd is None:
+            src_pcd = self.np_to_pcd(src_pts)
+        if tgt_pcd is None:
+            tgt_pcd = self.np_to_pcd(tgt_pts)
+        d1 = np.asarray(src_pcd.compute_point_cloud_distance(tgt_pcd), dtype=np.float64)
+        d2 = np.asarray(tgt_pcd.compute_point_cloud_distance(src_pcd), dtype=np.float64)
         if len(d1) == 0 or len(d2) == 0:
             return np.inf, np.inf
         return float(d1.mean() + d2.mean()), float(np.median(d1) + np.median(d2))
@@ -524,13 +544,15 @@ class SAM3DReconstructor:
             return 0.0
         return float(inter / union)
 
-    def projection_metrics(self, points, anchor_data):
+    def projection_metrics(self, points, anchor_data, depth_pred=None, mask_pred=None):
+        """计算投影指标。"""
         H = anchor_data["H"]
         W = anchor_data["W"]
         K = anchor_data["K"]
         depth_gt = anchor_data["depth_m"]
         mask_gt = anchor_data["mask_bin"] > 0
-        depth_pred, mask_pred = self.render_depth_and_mask(points, K, H, W)
+        if depth_pred is None or mask_pred is None:
+            depth_pred, mask_pred = self.render_depth_and_mask(points, K, H, W)
         iou = self.binary_iou(mask_gt, mask_pred > 0)
         overlap = mask_gt & np.isfinite(depth_pred) & np.isfinite(depth_gt) & (depth_gt > 1e-6)
         if overlap.sum() == 0:
@@ -542,12 +564,9 @@ class SAM3DReconstructor:
             "coverage": float(overlap.sum() / max(mask_gt.sum(), 1)),
         }
 
-    def projected_mask_bbox_wh(self, points, anchor_data, dilate_ksize=5):
-        H = anchor_data["H"]
-        W = anchor_data["W"]
-        K = anchor_data["K"]
-        _, mask_pred = self.render_depth_and_mask(points, K, H, W)
-        if mask_pred.sum() == 0:
+    @staticmethod
+    def _bbox_wh_from_mask(mask_pred, dilate_ksize=5):
+        if mask_pred is None or mask_pred.sum() == 0:
             return None
         if dilate_ksize > 1:
             kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
@@ -558,6 +577,22 @@ class SAM3DReconstructor:
         px_w = float(xs.max() - xs.min() + 1)
         px_h = float(ys.max() - ys.min() + 1)
         return np.array([px_w, px_h], dtype=np.float64)
+
+    def projected_mask_bbox_wh(self, points, anchor_data, dilate_ksize=5):
+        H = anchor_data["H"]
+        W = anchor_data["W"]
+        K = anchor_data["K"]
+        _, mask_pred = self.render_depth_and_mask(points, K, H, W)
+        return self._bbox_wh_from_mask(mask_pred, dilate_ksize=dilate_ksize)
+
+    def render_and_bbox(self, points, anchor_data, dilate_ksize=5):
+        """光栅化并得到 depth_pred、mask_pred、bbox_wh。"""
+        K = anchor_data["K"]
+        H = anchor_data["H"]
+        W = anchor_data["W"]
+        depth_pred, mask_pred = self.render_depth_and_mask(points, K, H, W)
+        bbox_wh = self._bbox_wh_from_mask(mask_pred, dilate_ksize=dilate_ksize)
+        return depth_pred, mask_pred, bbox_wh
 
     @staticmethod
     def solve_projected_bbox_scale(target_px_wh, src_px_wh, ww=0.25, wh=0.75):
@@ -571,16 +606,19 @@ class SAM3DReconstructor:
         den = ww * sw * sw + wh * sh * sh + 1e-12
         return max(float(num / den), 1e-8)
 
-    def icp_refine_rigid(self, source_pts, target_pts, threshold):
+    def icp_refine_rigid(self, source_pts, target_pts, threshold, target_pcd=None, max_iter=None):
+        """刚体 ICP 精细化。"""
         src = self.np_to_pcd(source_pts)
-        tgt = self.np_to_pcd(target_pts)
+        tgt = target_pcd if target_pcd is not None else self.np_to_pcd(target_pts)
+        if max_iter is None:
+            max_iter = self.icp_max_iter
         reg = o3d.pipelines.registration.registration_icp(
             src,
             tgt,
             threshold,
             np.eye(4),
             o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=self.icp_max_iter),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iter),
         )
         refined = self.apply_4x4_to_points(source_pts, reg.transformation)
         return refined, reg.transformation, float(reg.fitness), float(reg.inlier_rmse)
@@ -605,10 +643,26 @@ class SAM3DReconstructor:
             dtype=np.float64,
         )
 
-    def score_alignment(self, anchor_data, anchor_pts, sam_vis_refined, full_final_xy, target_xy, fitness, rmse):
+    def score_alignment(
+        self,
+        anchor_data,
+        anchor_pts,
+        sam_vis_refined,
+        full_final_xy,
+        target_xy,
+        fitness,
+        rmse,
+        anchor_pcd=None,
+        depth_pred=None,
+        mask_pred=None,
+    ):
         rel_err_full = np.abs(full_final_xy - target_xy) / np.maximum(target_xy, 1e-8)
-        mean_cd, med_cd = self.compute_symmetric_chamfer(anchor_pts, sam_vis_refined)
-        proj = self.projection_metrics(sam_vis_refined, anchor_data)
+        mean_cd, med_cd = self.compute_symmetric_chamfer(
+            anchor_pts, sam_vis_refined, src_pcd=anchor_pcd
+        )
+        proj = self.projection_metrics(
+            sam_vis_refined, anchor_data, depth_pred=depth_pred, mask_pred=mask_pred
+        )
         diag = float(np.linalg.norm([target_xy[0], target_xy[1], anchor_data["scale_targets"]["z_med"]]) + 1e-8)
         size_score = float(0.32 * rel_err_full[0] + 0.68 * rel_err_full[1])
         chamfer_n = mean_cd / diag if np.isfinite(mean_cd) else 1e6
@@ -642,6 +696,10 @@ class SAM3DReconstructor:
         sam_pts = self.remove_outliers_np(sam_pts, nb_neighbors=20, std_ratio=1.5)
         if len(sam_pts) == 0:
             raise RuntimeError("SAM3D point cloud is empty after downsampling.")
+
+        anchor_pcd = self.np_to_pcd(anchor_pts)
+
+        icp_search_iter = min(20, self.icp_max_iter)
 
         anchor_center = anchor_data["anchor_center"]
         target_xy = np.array(
@@ -679,7 +737,11 @@ class SAM3DReconstructor:
 
                 threshold = max(0.008, 4.0 * self.voxel_size)
                 sam_refined_vis, T_icp, fitness, rmse = self.icp_refine_rigid(
-                    sam_init_vis, anchor_pts, threshold
+                    sam_init_vis,
+                    anchor_pts,
+                    threshold,
+                    target_pcd=anchor_pcd,
+                    max_iter=icp_search_iter,
                 )
                 sam_refined_full = self.apply_4x4_to_points(sam_init_full, T_icp)
 
@@ -728,9 +790,20 @@ class SAM3DReconstructor:
 
                 full_xy_final, _, _ = self.robust_extent_xy(sam_final_full, low=2.0, high=98.0)
                 vis_xy_final, _, _ = self.robust_extent_xy(sam_final_vis, low=2.0, high=98.0)
-                proj_px_wh_final = self.projected_mask_bbox_wh(sam_final_vis, anchor_data, dilate_ksize=5)
+                depth_final, mask_final, proj_px_wh_final = self.render_and_bbox(
+                    sam_final_vis, anchor_data, dilate_ksize=5
+                )
                 metrics = self.score_alignment(
-                    anchor_data, anchor_pts, sam_final_vis, full_xy_final, target_xy, fitness, rmse
+                    anchor_data,
+                    anchor_pts,
+                    sam_final_vis,
+                    full_xy_final,
+                    target_xy,
+                    fitness,
+                    rmse,
+                    anchor_pcd=anchor_pcd,
+                    depth_pred=depth_final,
+                    mask_pred=mask_final,
                 )
 
                 result = {
@@ -766,11 +839,128 @@ class SAM3DReconstructor:
                     "full_final": sam_final_full,
                     "visible_final": sam_final_vis,
                 }
+                result["_sam_init_vis"] = sam_init_vis
+                result["_sam_init_full"] = sam_init_full
+                result["_threshold"] = threshold
+                result["_scale_pre"] = s
+
                 if best is None or result["score"] < best["score"]:
                     best = result
 
         if best is None:
             raise RuntimeError("Failed to find a valid alignment.")
+
+        if self.icp_max_iter > icp_search_iter:
+            sam_refined_vis_full, T_icp_full, fitness_full, rmse_full = self.icp_refine_rigid(
+                best["_sam_init_vis"],
+                anchor_pts,
+                best["_threshold"],
+                target_pcd=anchor_pcd,
+                max_iter=self.icp_max_iter,
+            )
+            sam_refined_full_full = self.apply_4x4_to_points(best["_sam_init_full"], T_icp_full)
+
+            R_best = best["R"]
+            ridx_best = best["R_idx"]
+            s_pre = best["_scale_pre"]
+
+            full_xy_after_icp, _, _ = self.robust_extent_xy(sam_refined_full_full, low=2.0, high=98.0)
+            s_corr_xy = self.solve_scale_xy(target_xy, full_xy_after_icp)
+            s_corr_xy = float(np.clip(s_corr_xy, 0.94, 1.06))
+
+            sam_corr_full = self.centered_similarity(sam_refined_full_full, scale=s_corr_xy, center=anchor_center)
+            sam_corr_vis = self.centered_similarity(sam_refined_vis_full, scale=s_corr_xy, center=anchor_center)
+            t1 = self.translation_from_visible_center(sam_corr_vis, anchor_center, target_z)
+            sam_corr_full = sam_corr_full + t1[None, :]
+            sam_corr_vis = sam_corr_vis + t1[None, :]
+
+            target_px_wh = np.array(
+                [
+                    anchor_data["scale_targets"]["pixel_w"],
+                    anchor_data["scale_targets"]["pixel_h"],
+                ],
+                dtype=np.float64,
+            )
+            proj_px_wh = self.projected_mask_bbox_wh(sam_corr_vis, anchor_data, dilate_ksize=5)
+            s_corr_proj = self.solve_projected_bbox_scale(target_px_wh, proj_px_wh, ww=0.18, wh=0.82)
+            s_corr_proj = float(np.clip(s_corr_proj, 0.97, 1.00))
+
+            s_corr_pre_obj = float(np.sqrt(s_corr_xy * s_corr_proj))
+            s_corr_pre_obj = float(np.clip(s_corr_pre_obj, 0.97, 1.02))
+
+            sam_mid_full = self.centered_similarity(sam_refined_full_full, scale=s_corr_pre_obj, center=anchor_center)
+            sam_mid_vis = self.centered_similarity(sam_refined_vis_full, scale=s_corr_pre_obj, center=anchor_center)
+            t_mid = self.translation_from_visible_center(sam_mid_vis, anchor_center, target_z)
+            sam_mid_full = sam_mid_full + t_mid[None, :]
+            sam_mid_vis = sam_mid_vis + t_mid[None, :]
+
+            obj_ext_mid, _, _, _, _ = self.robust_pca_extents(sam_mid_full, low=2.0, high=98.0)
+            s_corr_obj = self.solve_scale_object_dims(target_xy, obj_ext_mid, ww=0.18, wh=0.82)
+            s_corr_obj = float(np.clip(s_corr_obj, 0.95, 1.01))
+
+            s_corr = float(s_corr_pre_obj * s_corr_obj)
+            s_corr = float(np.clip(s_corr, 0.94, 1.02))
+
+            sam_final_full = self.centered_similarity(sam_refined_full_full, scale=s_corr, center=anchor_center)
+            sam_final_vis = self.centered_similarity(sam_refined_vis_full, scale=s_corr, center=anchor_center)
+            t2 = self.translation_from_visible_center(sam_final_vis, anchor_center, target_z)
+            sam_final_full = sam_final_full + t2[None, :]
+            sam_final_vis = sam_final_vis + t2[None, :]
+
+            full_xy_final, _, _ = self.robust_extent_xy(sam_final_full, low=2.0, high=98.0)
+            vis_xy_final, _, _ = self.robust_extent_xy(sam_final_vis, low=2.0, high=98.0)
+            depth_final, mask_final, proj_px_wh_final = self.render_and_bbox(
+                sam_final_vis, anchor_data, dilate_ksize=5
+            )
+            metrics = self.score_alignment(
+                anchor_data,
+                anchor_pts,
+                sam_final_vis,
+                full_xy_final,
+                target_xy,
+                fitness_full,
+                rmse_full,
+                anchor_pcd=anchor_pcd,
+                depth_pred=depth_final,
+                mask_pred=mask_final,
+            )
+
+            best = {
+                "score": metrics["score"],
+                "R_idx": ridx_best,
+                "R": R_best,
+                "scale_pre": float(s_pre),
+                "scale_correction_xy": float(s_corr_xy),
+                "scale_correction_proj": float(s_corr_proj),
+                "scale_correction_obj": float(s_corr_obj),
+                "scale_correction_pre_obj": float(s_corr_pre_obj),
+                "scale_correction": float(s_corr),
+                "scale": float(s_pre * s_corr),
+                "T_icp": T_icp_full,
+                "fitness": float(fitness_full),
+                "rmse": float(rmse_full),
+                "mean_cd": metrics["mean_cd"],
+                "med_cd": metrics["med_cd"],
+                "iou": metrics["iou"],
+                "depth_mae": metrics["depth_mae"],
+                "coverage": metrics["coverage"],
+                "target_wh": target_xy.copy(),
+                "target_px_wh": target_px_wh.copy(),
+                "projected_px_wh": np.array(
+                    proj_px_wh_final if proj_px_wh_final is not None else [-1.0, -1.0],
+                    dtype=np.float64,
+                ),
+                "aligned_full_wh": full_xy_final,
+                "aligned_vis_wh": vis_xy_final,
+                "size_rel_err_full_wh": metrics["size_rel_err_full"],
+                "raw_full_wh_before_scale": best["raw_full_wh_before_scale"],
+                "raw_full_wh_after_icp_pre_corr": np.array(full_xy_after_icp, dtype=np.float64),
+                "full_final": sam_final_full,
+                "visible_final": sam_final_vis,
+            }
+
+        for k in ("_sam_init_vis", "_sam_init_full", "_threshold", "_scale_pre"):
+            best.pop(k, None)
         return best
 
     # ============================================================

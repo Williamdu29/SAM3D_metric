@@ -15,10 +15,80 @@ def set_attention_backend():
         gpu_name = "CPU"
 
     logger.info(f"GPU name is {gpu_name}")
-    if "A100" in gpu_name or "H100" in gpu_name or "H200" in gpu_name:
-        # logger.info("Use flash_attn")
+
+    # 1) 优先尊重用户已经设置的环境变量
+    user_attn = os.environ.get("ATTN_BACKEND")
+    user_sparse_attn = os.environ.get("SPARSE_ATTN_BACKEND")
+    if user_attn:
+        logger.info(f"[ATTN] Respecting pre-set ATTN_BACKEND={user_attn}")
+        if not user_sparse_attn:
+            os.environ["SPARSE_ATTN_BACKEND"] = user_attn
+        return
+
+    # 2) 若能 import flash_attn 则直接用（与显卡名无关，现代 3090/4090/A6000 也支持）
+    # 注意：pip list 里有 flash_attn 不代表「当前这次 python」能加载 .so（多环境 / CUDA 版本 / torch ABI 不匹配会 ImportError）。
+    try:
+        import flash_attn  # noqa: F401
+        import flash_attn.flash_attn_interface  # noqa: F401
+
         os.environ["ATTN_BACKEND"] = "flash_attn"
         os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
+        logger.info("[ATTN] flash_attn detected, using flash_attn backend")
+        return
+    except Exception as e:
+        logger.warning(
+            "[ATTN] flash_attn 未启用。原因: {}: {}。"
+            " 请用**运行脚本同一个**解释器自检: python -c \"import flash_attn; import flash_attn.flash_attn_interface\"",
+            type(e).__name__,
+            e,
+        )
+
+    # 3) 回退：老的显卡名白名单（A100/H100/H200）
+    if "A100" in gpu_name or "H100" in gpu_name or "H200" in gpu_name:
+        os.environ["ATTN_BACKEND"] = "flash_attn"
+        os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
+        logger.info(f"[ATTN] GPU {gpu_name} matches whitelist, using flash_attn")
+    else:
+        logger.info("[ATTN] Using default SDPA backend")
+
+
+def sync_attention_backends_from_env():
+    """
+    在模型全部加载后再次从环境变量同步 dense/sparse attention 后端。
+
+    若其它模块在 ``inference_pipeline`` 之前 import 了 attention，``_state`` 可能仍是
+    默认 sdpa；此处与 ``set_attention_backend()`` 已写入的 ``os.environ`` 对齐，保证
+    前向时 ``get_backend()`` / ``get_sparse_attn()`` 与日志一致。
+    """
+    try:
+        from sam3d_objects.model.backbone.tdfy_dit.modules.attention import (
+            refresh_backend_from_env,
+            get_backend,
+        )
+
+        refresh_backend_from_env()
+        logger.info(
+            "[ATTN] After sync: ATTN_BACKEND env={} -> dense get_backend()={}",
+            os.environ.get("ATTN_BACKEND"),
+            get_backend(),
+        )
+    except Exception as e:
+        logger.warning("[ATTN] refresh_backend_from_env failed: {}", e)
+    try:
+        from sam3d_objects.model.backbone.tdfy_dit.modules.sparse import (
+            refresh_sparse_attn_from_env,
+            get_sparse_attn,
+        )
+
+        refresh_sparse_attn_from_env()
+        logger.info(
+            "[ATTN] After sync: SPARSE_ATTN_BACKEND env={} -> sparse get_sparse_attn()={}",
+            os.environ.get("SPARSE_ATTN_BACKEND"),
+            get_sparse_attn(),
+        )
+    except Exception as e:
+        logger.warning("[ATTN] refresh_sparse_attn_from_env failed: {}", e)
+
 
 set_attention_backend()
 
@@ -79,12 +149,12 @@ class InferencePipeline:
         pose_decoder_name="default",
         workspace_dir="",
         downsample_ss_dist=0,  # the distance we use to downsample
-        ss_inference_steps=25,
+        ss_inference_steps=12,
         ss_rescale_t=3,
         ss_cfg_strength=7,
         ss_cfg_interval=[0, 500],
         ss_cfg_strength_pm=0.0,
-        slat_inference_steps=25,
+        slat_inference_steps=12,
         slat_rescale_t=3,
         slat_cfg_strength=5,
         slat_cfg_interval=[0, 500],
@@ -203,6 +273,20 @@ class InferencePipeline:
                 logger.info("Model compilation completed!")
             self.slat_mean = torch.tensor(slat_mean)
             self.slat_std = torch.tensor(slat_std)
+
+            # 确保 dense/sparse attention 内部 _state 与 set_attention_backend 写入的 env 一致
+            sync_attention_backends_from_env()
+
+    def _release_cross_attn_kv_cache_safe(self):
+        """DiT 采样与 decode 之间释放 CA K/V，避免 mesh 等阶段峰值 OOM。"""
+        try:
+            from sam3d_objects.model.backbone.tdfy_dit.modules.attention.ca_cache import (
+                release_cross_attn_kv_cache,
+            )
+
+            release_cross_attn_kv_cache(self, verbose=False)
+        except Exception:
+            pass
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64
@@ -421,7 +505,7 @@ class InferencePipeline:
         self,
         ss_generator,
         cfg_strength=7,
-        inference_steps=25,
+        inference_steps=12,
         rescale_t=3,
         cfg_interval=[0, 500],
         cfg_strength_pm=0.0,
@@ -448,7 +532,7 @@ class InferencePipeline:
         self,
         slat_generator,
         cfg_strength=5,
-        inference_steps=25,
+        inference_steps=12,
         rescale_t=3,
         cfg_interval=[0, 500],
     ):
@@ -502,6 +586,7 @@ class InferencePipeline:
                 inference_steps=stage1_inference_steps,
                 use_distillation=use_stage1_distillation,
             )
+            self._release_cross_attn_kv_cache_safe()
 
             ss_return_dict.update(self.pose_decoder(ss_return_dict))
 
@@ -520,6 +605,7 @@ class InferencePipeline:
                 inference_steps=stage2_inference_steps,
                 use_distillation=use_stage2_distillation,
             )
+            self._release_cross_attn_kv_cache_safe()
             outputs = self.decode_slat(
                 slat, self.decode_formats if decode_formats is None else decode_formats
             )
@@ -724,7 +810,7 @@ class InferencePipeline:
         self,
         slat_input: dict,
         coords: torch.Tensor,
-        inference_steps=25,
+        inference_steps=12,
         use_distillation=False,
     ) -> sp.SparseTensor:
         image = slat_input["image"]

@@ -9,13 +9,14 @@ import torch
 import psutil
 import trimesh
 import tempfile
+import time
 
 # ============================================================
 # User Config (V2)
 # ============================================================
-RGB_PATH = "/mnt/dct/SKU/ice_tea/image/1775209506830.jpg"
-DEPTH_PATH = "/mnt/dct/SKU/ice_tea/depth/1775209506830.png"
-MASK_PATH = "/mnt/dct/SKU/ice_tea/masks/maskdata/20260407_112555.png"
+RGB_PATH = "/mnt/dct/data/replay/mouse/images/62.png"
+DEPTH_PATH = "/mnt/dct/data/replay/mouse/depths/62.png"
+MASK_PATH = "/mnt/dct/data/replay/mouse/masks/maskdata/62.png"
 K_PATH = "/mnt/dct/SKU/cookie/K.txt"
 
 SAM3D_ROOT = "/home/dct/work/sam-3d-objects"
@@ -28,8 +29,8 @@ DEBUG_METRIC_PCD_PATH = None
 DEBUG_METRIC_VIS_PCD_PATH = None
 
 # 最终导出
-EXPORT_METRIC_MESH_PATH = "/home/dct/work/sam-3d-objects/Outputs_V2/ice_tea/sam3d_metric_mesh.ply"
-EXPORT_METRIC_MESH_AXIS_ALIGNED_PATH = "/home/dct/work/sam-3d-objects/Outputs_V2/ice_tea/sam3d_metric_mesh_axis_aligned.ply"
+EXPORT_METRIC_MESH_PATH = "/home/dct/work/sam-3d-objects/Outputs_V2/mouse/sam3d_metric_mesh.ply"
+EXPORT_METRIC_MESH_AXIS_ALIGNED_PATH = "/home/dct/work/sam-3d-objects/Outputs_V2/mouse/sam3d_metric_mesh_axis_aligned.ply"
 
 VOXEL_SIZE = 0.0025
 ICP_MAX_ITER = 40
@@ -741,23 +742,43 @@ def apply_alignment_to_trimesh(raw_mesh, align):
     raise TypeError(f"Unsupported mesh type: {type(mesh)}")
 
 
+def ensure_parent_dir(file_path):
+    """
+    确保输出文件的父目录存在。
+    例如:
+        /a/b/c/out.ply
+    会自动创建:
+        /a/b/c
+    """
+    parent_dir = os.path.dirname(os.path.abspath(file_path))
+    if parent_dir != "":
+        os.makedirs(parent_dir, exist_ok=True)
+
+
 def export_mesh_as_ply(mesh, out_path):
     """
     将 metric mesh 导出为 .ply
     - 如果是 Trimesh：直接导出
     - 如果是 Scene：先合并成单个 Trimesh 再导出
+    - 自动创建输出目录
     """
-    if not str(out_path).lower().endswith(".ply"):
+    out_path = os.path.abspath(out_path)
+
+    if not out_path.lower().endswith(".ply"):
         raise ValueError(f"PLY export path must end with .ply, got: {out_path}")
 
+    ensure_parent_dir(out_path)
+
     if isinstance(mesh, trimesh.Trimesh):
-        # 直接按 ply 导出
+        if len(mesh.vertices) == 0:
+            raise ValueError("Cannot export empty Trimesh: mesh has no vertices.")
         mesh.export(out_path, file_type="ply")
         return
 
     if isinstance(mesh, trimesh.Scene):
-        # Scene 先合并为单 mesh，再导出 ply
         merged = merge_scene_to_single_trimesh(mesh)
+        if len(merged.vertices) == 0:
+            raise ValueError("Cannot export empty merged mesh: mesh has no vertices.")
         merged.export(out_path, file_type="ply")
         return
 
@@ -838,6 +859,33 @@ def pca_align_trimesh_to_origin(raw_mesh):
 
 
 # ============================================================
+# Timing helpers
+# ============================================================
+def format_seconds(seconds):
+    """
+    将秒数格式化为更容易读的形式。
+    例如:
+        65.23 -> 1m 5.23s
+        3725.8 -> 1h 2m 5.80s
+    """
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {sec:.2f}s"
+
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m {sec:.2f}s"
+
+
+def print_step_time(step_name, elapsed):
+    print(f"[TIMER] {step_name:<45} {format_seconds(elapsed)}")
+
+
+
+# ============================================================
 # Diagnostics
 # ============================================================
 def print_gpu_mem(tag=""):
@@ -867,6 +915,9 @@ def print_ram_mem(tag=""):
 # ============================================================
 def main():
     tmp_raw_ply = None
+    timing = {}
+
+    total_start = time.perf_counter()
 
     try:
         if torch.cuda.is_available():
@@ -874,6 +925,11 @@ def main():
 
         print_gpu_mem("start")
         print_ram_mem("start")
+
+        # ------------------------------------------------------------
+        # [1/5] Build anchor data
+        # ------------------------------------------------------------
+        step_start = time.perf_counter()
 
         print("[1/5] Build anchor data from RGB-D...")
         anchor_data = build_anchor_data(RGB_PATH, DEPTH_PATH, MASK_PATH, K_PATH)
@@ -894,6 +950,14 @@ def main():
         print_gpu_mem("after_anchor")
         print_ram_mem("after_anchor")
 
+        timing["1_build_anchor"] = time.perf_counter() - step_start
+        print_step_time("[1/5] Build anchor data", timing["1_build_anchor"])
+
+        # ------------------------------------------------------------
+        # [2/5] Run SAM3D
+        # ------------------------------------------------------------
+        step_start = time.perf_counter()
+
         print("\n[2/5] Run SAM3D and get raw point cloud + raw mesh...")
         if not RUN_SAM3D:
             raise RuntimeError("This V2 code expects RUN_SAM3D=True.")
@@ -913,6 +977,14 @@ def main():
         print_ram_mem("after_sam3d")
 
         sam_pcd = load_pcd(raw_sam_path)
+
+        timing["2_run_sam3d"] = time.perf_counter() - step_start
+        print_step_time("[2/5] Run SAM3D", timing["2_run_sam3d"])
+
+        # ------------------------------------------------------------
+        # [3/5] Solve metric alignment
+        # ------------------------------------------------------------
+        step_start = time.perf_counter()
 
         print("\n[3/5] Solve metric scale/pose on point cloud...")
         best = search_metric_alignment(anchor_data, sam_pcd)
@@ -948,6 +1020,14 @@ def main():
             save_pcd(DEBUG_METRIC_VIS_PCD_PATH, np_to_pcd(best["visible_final"]))
             print("Saved debug metric visible pcd:", DEBUG_METRIC_VIS_PCD_PATH)
 
+        timing["3_solve_alignment"] = time.perf_counter() - step_start
+        print_step_time("[3/5] Solve metric alignment", timing["3_solve_alignment"])
+
+        # ------------------------------------------------------------
+        # [4/5] Apply transform and export mesh
+        # ------------------------------------------------------------
+        step_start = time.perf_counter()
+
         print("\n[4/5] Apply solved transform to SAM3D native mesh...")
         metric_mesh = apply_alignment_to_trimesh(raw_mesh, best)
 
@@ -964,19 +1044,56 @@ def main():
         print_gpu_mem("after_mesh")
         print_ram_mem("after_mesh")
 
+        timing["4_apply_export_mesh"] = time.perf_counter() - step_start
+        print_step_time("[4/5] Apply transform and export mesh", timing["4_apply_export_mesh"])
+
+        # ------------------------------------------------------------
+        # [5/5] Final summary
+        # ------------------------------------------------------------
+        step_start = time.perf_counter()
+
         print("\n[5/5] Done.")
         print("V2 pipeline summary:")
         print("  - point cloud is used only for metric alignment")
         print("  - final mesh comes from SAM3D native mesh (output['glb'])")
         print("  - no mesh reconstruction from aligned point cloud")
 
+        timing["5_summary"] = time.perf_counter() - step_start
+        print_step_time("[5/5] Final summary", timing["5_summary"])
+
     finally:
+        cleanup_start = time.perf_counter()
+
         if tmp_raw_ply is not None and os.path.exists(tmp_raw_ply):
             try:
                 os.remove(tmp_raw_ply)
                 print("Removed temp raw point cloud:", tmp_raw_ply)
             except Exception as e:
                 print("Warning: failed to remove temp raw point cloud:", e)
+
+        timing["cleanup"] = time.perf_counter() - cleanup_start
+        total_elapsed = time.perf_counter() - total_start
+
+        print("\n" + "=" * 72)
+        print("Timing summary")
+        print("=" * 72)
+
+        ordered_keys = [
+            "1_build_anchor",
+            "2_run_sam3d",
+            "3_solve_alignment",
+            "4_apply_export_mesh",
+            "5_summary",
+            "cleanup",
+        ]
+
+        for key in ordered_keys:
+            if key in timing:
+                print(f"{key:<28} {format_seconds(timing[key])}")
+
+        print("-" * 72)
+        print(f"{'total':<28} {format_seconds(total_elapsed)}")
+        print("=" * 72)
 
 
 if __name__ == "__main__":

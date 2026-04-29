@@ -1,5 +1,5 @@
 # AIGC 3D Reconstruction Model
-
+### ![V1](https://img.shields.io/badge/V1-Point--Cloud--to--Mesh-blue) Point-Cloud-Based Metric Reconstruction
 ## V1
 
 ## Overall Idea of the V1 Strategy
@@ -423,8 +423,27 @@ It is **not** a full reproduction of Any6D's joint pose-size render-and-compare 
 
 This trade-off was made mainly for implementation efficiency and time cost.
 
+### ![V2](https://img.shields.io/badge/V2-Native--Mesh--Alignment-brightgreen) Native Mesh Metric Alignment
+## V2
+This module provides a V2 reconstruction pipeline for converting SAM3D object outputs into metrically aligned, visually clean 3D meshes using an RGB image, a depth image, an object mask, and camera intrinsics.
 
+The key idea is to separate **metric alignment** from **mesh generation**. In the previous V1 pipeline, the SAM3D point cloud was first scaled and aligned to the RGB-D observation, and a new mesh was reconstructed from the aligned point cloud. While this produced a metric result, the final mesh quality depended heavily on point-cloud reconstruction and could contain sparse points, noisy surfaces, holes, or loss of texture.
 
+In the V2 pipeline, SAM3D is still used to generate both a raw point cloud and its native textured mesh. The raw SAM3D point cloud is used only as a geometric proxy for estimating the metric transformation. The pipeline builds an RGB-D anchor point cloud from the input depth map and object mask, estimates the real-world object size from the camera intrinsics, searches over PCA-based rotation candidates, solves an isotropic scale, and refines the visible-surface alignment with ICP. After the best alignment is found, the same similarity transform and ICP transform are applied directly to the native SAM3D mesh vertices.
+
+This design preserves the high-quality topology and texture produced by SAM3D while still placing the reconstructed object into a real metric coordinate system. As a result, the final output is cleaner and more visually complete than a mesh reconstructed from the aligned point cloud, while also retaining useful metric properties such as real-world scale, aligned point clouds, depth/mask projection metrics, and optional PCA-based canonical axis alignment.
+
+The pipeline exports:
+
+- the RGB-D anchor point cloud;
+- the raw SAM3D point cloud;
+- the metrically aligned full SAM3D point cloud;
+- the metrically aligned visible-surface point cloud;
+- the metrically aligned native SAM3D mesh in PLY and OBJ format;
+- an optional PCA axis-aligned version of the metric mesh;
+- JSON / NPY alignment metrics and timing logs.
+
+Compared with the V1 point-cloud-to-mesh pipeline, this V2 native-mesh alignment pipeline produces smoother, more complete, and texture-preserving meshes, because the final mesh is not regenerated from sparse aligned points. Instead, the point cloud is used to solve the transformation, and the transformation is then transferred to the original SAM3D mesh.
 
 
 # SAM3DReconstructor

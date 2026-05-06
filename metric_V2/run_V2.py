@@ -104,12 +104,12 @@ def run_sam3d(rgb_path, mask_path, config_path, save_ply_path=None):
     if "gs" not in output:
         raise KeyError('SAM3D output does not contain "gs".')
 
-    raw_mesh = output["glb"]
+    raw_mesh = output["glb"] # SAM3D 原生 mesh，优先取 output["glb"]
 
     if save_ply_path is None:
         save_ply_path = make_temp_ply_path()
 
-    output["gs"].save_ply(save_ply_path)
+    output["gs"].save_ply(save_ply_path) # 把 SAM3D 点云保存为 ply 文件，后续用 open3d 读入并处理
 
     if not os.path.exists(save_ply_path):
         raise RuntimeError(f"SAM3D gs.save_ply did not create file: {save_ply_path}")
@@ -169,7 +169,7 @@ def generate_sign_flip_rotations(base_R):
     return rots
 
 
-def centered_similarity(points, scale=1.0, R=None, t=None, center=None):
+def centered_similarity(points, scale=1.0, R=None, t=None, center=None): # 以 center 为中心，对 points 应用相似变换（旋转 R、缩放 scale、平移 t）
     X = points.copy()
     if center is not None:
         X = X - center[None, :]
@@ -211,9 +211,9 @@ def largest_component(mask):
 
 def morph_clean(mask, ksize=5):
     kernel = np.ones((ksize, ksize), np.uint8)
-    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-    mask = largest_component(mask)
+    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel) # 开运算去最小的噪点
+    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel) # 闭运算填充小孔洞
+    mask = largest_component(mask) # 保留最大的连通域
     return mask.astype(np.uint8)
 
 
@@ -232,14 +232,14 @@ def infer_depth_meters(depth):
 def depth_to_points(depth_m, mask, K):
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
-    ys, xs = np.where(mask > 0)
+    ys, xs = np.where(mask > 0) # ys 和 xs 是相机坐标系中的像素坐标（v, u）
     z = depth_m[ys, xs]
     valid = np.isfinite(z) & (z > 1e-6)
     xs, ys, z = xs[valid], ys[valid], z[valid]
-    X = (xs - cx) * z / fx
+    X = (xs - cx) * z / fx # X = (u - cx) * Z / fx，其中 u 是像素坐标系中的水平坐标，Z 是深度值，X 是相机坐标系中的水平坐标
     Y = (ys - cy) * z / fy
     Z = z
-    pts = np.stack([X, Y, Z], axis=1).astype(np.float32)
+    pts = np.stack([X, Y, Z], axis=1).astype(np.float32) # pts 是相机坐标系中的点云坐标，单位是米
     return pts, xs, ys
 
 
@@ -287,7 +287,9 @@ def estimate_anchor_scale_targets(mask, depth_m, K):
     px_w = float(x1 - x0 + 1)
     px_h = float(y1 - y0 + 1)
     fx, fy = float(K[0, 0]), float(K[1, 1])
-    metric_w = px_w * z_med / fx
+
+    # 针孔相机模型: X = (u - cx) * Z / fx, Y = (v - cy) * Z / fy
+    metric_w = px_w * z_med / fx # 真实宽度 = 像素宽度 × 深度 / fx
     metric_h = px_h * z_med / fy
 
     return {
@@ -320,7 +322,7 @@ def build_anchor_data(rgb_path, depth_path, mask_path, K_path):
         raise FileNotFoundError(mask_path)
 
     K = np.loadtxt(K_path).reshape(3, 3)
-    depth_m, depth_mode = infer_depth_meters(depth)
+    depth_m, depth_mode = infer_depth_meters(depth) # 判读深度单位并转换为米
 
     mask_bin = morph_clean((mask > 0).astype(np.uint8), ksize=5)
     scale_targets = estimate_anchor_scale_targets(mask_bin, depth_m, K)
@@ -486,7 +488,7 @@ def icp_refine_rigid(source_pts, target_pts, threshold):
         tgt,
         threshold,
         np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(), # 点到点 ICP
         o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=ICP_MAX_ITER),
     )
     refined = apply_4x4_to_points(source_pts, reg.transformation)
@@ -531,7 +533,7 @@ def solve_scale_object_dims(target_hw, src_ext_sorted, ww=0.20, wh=0.80):
 
 def score_alignment(anchor_data, anchor_pts, sam_vis_refined, full_final_xy, target_xy, fitness, rmse):
     rel_err_full = np.abs(full_final_xy - target_xy) / np.maximum(target_xy, 1e-8)
-    mean_cd, med_cd = compute_symmetric_chamfer(anchor_pts, sam_vis_refined)
+    mean_cd, med_cd = compute_symmetric_chamfer(anchor_pts, sam_vis_refined) # 可见点云与 Anchor 点云之间的对称 Chamfer 距离
     proj = projection_metrics(sam_vis_refined, anchor_data)
     diag = float(np.linalg.norm([target_xy[0], target_xy[1], anchor_data["scale_targets"]["z_med"]]) + 1e-8)
     size_score = float(0.32 * rel_err_full[0] + 0.68 * rel_err_full[1])
@@ -576,36 +578,38 @@ def search_metric_alignment(anchor_data, sam_pcd):
         anchor_data["scale_targets"]["metric_w"],
         anchor_data["scale_targets"]["metric_h"],
     ], dtype=np.float64)
-    target_z = float(anchor_data["scale_targets"]["z_med"])
+    target_z = float(anchor_data["scale_targets"]["z_med"]) # 确定目标宽高（真实宽高） 和 目标深度
 
     anchor_pca_center, anchor_axes, _ = compute_pca_frame(anchor_pts)
     sam_center, sam_axes, _ = compute_pca_frame(sam_pts)
     _ = anchor_pca_center
 
-    base_R = anchor_axes @ sam_axes.T
+    base_R = anchor_axes @ sam_axes.T # 计算初始旋转矩阵，使得 SAM3D 点云的 PCA 主轴与 Anchor 点云的 PCA 主轴对齐
     candidate_Rs = generate_sign_flip_rotations(base_R)
 
     best = None
-    for ridx, R in enumerate(candidate_Rs):
-        sam_rot_full = centered_similarity(sam_pts, scale=1.0, R=R, center=sam_center)
-        full_xy_raw, _, _ = robust_extent_xy(sam_rot_full, low=2.0, high=98.0)
-        scale0 = solve_scale_xy(target_xy, full_xy_raw)
+    for ridx, R in enumerate(candidate_Rs): # 对于每个候选旋转
+        sam_rot_full = centered_similarity(sam_pts, scale=1.0, R=R, center=sam_center) # 以 sam_center 为中心，对 sam_pts 应用旋转 R，得到 sam_rot_full
+        full_xy_raw, _, _ = robust_extent_xy(sam_rot_full, low=2.0, high=98.0) # 计算 sam_rot_full 在 XY 平面的范围（宽高）
+        scale0 = solve_scale_xy(target_xy, full_xy_raw) # 计算初始缩放因子，使得 sam_rot_full 的 XY 范围尽可能接近目标范围 target_xy
 
         for mult in [0.94, 0.98, 1.00, 1.02, 1.06]:
             s = scale0 * mult
-            sam_scaled_full = centered_similarity(sam_pts, scale=s, R=R, center=sam_center)
+            sam_scaled_full = centered_similarity(sam_pts, scale=s, R=R, center=sam_center) # 应用多个微调的缩放因子，得到 sam_scaled_full
             sam_scaled_vis = extract_visible_surface_from_camera(sam_scaled_full)
             if len(sam_scaled_vis) < 100:
                 continue
 
+            # 把 sam_scaled_vis 的中心对齐到 anchor_center，并把深度中位数对齐到 target_z，得到 sam_init_vis 和 sam_init_full 作为 ICP 的初始输入
             t0 = translation_from_visible_center(sam_scaled_vis, anchor_center, target_z)
             sam_init_full = sam_scaled_full + t0[None, :]
             sam_init_vis = sam_scaled_vis + t0[None, :]
 
             threshold = max(0.008, 4.0 * VOXEL_SIZE)
-            sam_refined_vis, T_icp, fitness, rmse = icp_refine_rigid(sam_init_vis, anchor_pts, threshold)
-            sam_refined_full = apply_4x4_to_points(sam_init_full, T_icp)
+            sam_refined_vis, T_icp, fitness, rmse = icp_refine_rigid(sam_init_vis, anchor_pts, threshold) # ICP 是在可见点云 sam_init_vis 和 Anchor 点云 anchor_pts 之间进行的
+            sam_refined_full = apply_4x4_to_points(sam_init_full, T_icp) # 用 ICP 的结果 T_icp 来变换 sam_init_full，得到 sam_refined_full
 
+            # 第一次尺度修正：XY extent correction
             full_xy_after_icp, _, _ = robust_extent_xy(sam_refined_full, low=2.0, high=98.0)
             s_corr_xy = solve_scale_xy(target_xy, full_xy_after_icp)
             s_corr_xy = float(np.clip(s_corr_xy, 0.94, 1.06))
@@ -616,11 +620,13 @@ def search_metric_alignment(anchor_data, sam_pcd):
             sam_corr_full = sam_corr_full + t1[None, :]
             sam_corr_vis = sam_corr_vis + t1[None, :]
 
+
+            # 第二次尺度修正：投影 bbox correction
             target_px_wh = np.array([
                 anchor_data["scale_targets"]["pixel_w"],
                 anchor_data["scale_targets"]["pixel_h"],
             ], dtype=np.float64)
-            proj_px_wh = projected_mask_bbox_wh(sam_corr_vis, anchor_data, dilate_ksize=5)
+            proj_px_wh = projected_mask_bbox_wh(sam_corr_vis, anchor_data, dilate_ksize=5) # 把 sam_corr_vis 投影到图像平面，计算投影的像素宽高 proj_px_wh
             s_corr_proj = solve_projected_bbox_scale(target_px_wh, proj_px_wh, ww=0.18, wh=0.82)
             s_corr_proj = float(np.clip(s_corr_proj, 0.97, 1.00))
 
@@ -633,6 +639,7 @@ def search_metric_alignment(anchor_data, sam_pcd):
             sam_mid_full = sam_mid_full + t_mid[None, :]
             sam_mid_vis = sam_mid_vis + t_mid[None, :]
 
+            # 第三次尺度修正：object-frame correction
             obj_ext_mid, _, _, _, _ = robust_pca_extents(sam_mid_full, low=2.0, high=98.0)
             s_corr_obj = solve_scale_object_dims(target_xy, obj_ext_mid, ww=0.18, wh=0.82)
             s_corr_obj = float(np.clip(s_corr_obj, 0.95, 1.01))
@@ -776,7 +783,7 @@ def export_mesh_as_ply(mesh, out_path):
         return
 
     if isinstance(mesh, trimesh.Scene):
-        merged = merge_scene_to_single_trimesh(mesh)
+        merged = merge_scene_to_single_trimesh(mesh) # 合并Scene 中的所有几何体成一个 Trimesh
         if len(merged.vertices) == 0:
             raise ValueError("Cannot export empty merged mesh: mesh has no vertices.")
         merged.export(out_path, file_type="ply")
@@ -976,7 +983,7 @@ def main():
         print_gpu_mem("after_sam3d")
         print_ram_mem("after_sam3d")
 
-        sam_pcd = load_pcd(raw_sam_path)
+        sam_pcd = load_pcd(raw_sam_path) # 注意：SAM3D 输出的点云已经是稠密的了，不需要再做 Poisson 重建等处理
 
         timing["2_run_sam3d"] = time.perf_counter() - step_start
         print_step_time("[2/5] Run SAM3D", timing["2_run_sam3d"])

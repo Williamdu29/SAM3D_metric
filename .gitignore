@@ -10,24 +10,23 @@ __pycache__/
 .vscode/
 .idea/
 
-# Logs
-*.log
-build.log
-
 # Reconstruction outputs
 Outputs/
-Outputs_*/
+Outputs_V2/
+Outputs_V2.5/
 soda_cookie_output/
 result/
+notebook/meshes/
 *_output/
-service_outputs/
 
-# 3D / point cloud / generated model outputs
+# Generated 3D/model outputs
 *.ply
 *.obj
 *.glb
 *.npy
 
-# Temporary files
-*.tmp
-*.temp
+# Logs/cache
+build.log
+__pycache__/
+.DS_Store
+EOF

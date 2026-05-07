@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import copy
+import gc
 from contextlib import contextmanager
 
 import cv2
@@ -29,6 +30,9 @@ class SAM3DReconstructor:
         )
     """
 
+    # ============================================================
+    # Part 1 / 类初始化：只保存配置，不加载模型，不占用 GPU 显存
+    # ============================================================
     def __init__(
         self,
         sam3d_root,
@@ -41,6 +45,13 @@ class SAM3DReconstructor:
         sam_compile=False,
         verbose=True,
         ):
+        """
+        只保存路径、参数和轻量状态；不 import SAM3D 的 Inference，
+        不实例化模型，不加载权重，也不主动创建 CUDA 上下文。
+
+        模型权重请通过 load_model() 显式加载；为了保持旧调用方式，
+        run_sam3d()/recon(run_sam3d=True) 会在需要时自动调用 load_model()。
+        """
         self.sam3d_root = sam3d_root
         self.sam3d_config = sam3d_config
         self.default_out_dir = out_dir
@@ -52,35 +63,74 @@ class SAM3DReconstructor:
         self.sam_compile = sam_compile
         self.verbose = verbose
 
-        # 只有提供了默认输出目录时才创建
-        if self.default_out_dir is not None:
-            os.makedirs(self.default_out_dir, exist_ok=True)
+        # 初始化阶段只记录路径，不导入/实例化模型。
+        self._repo_root = os.path.abspath(self.sam3d_root)
+        self._notebook_dir = os.path.join(self.sam3d_root, "notebook")
 
-        # 关键：必须先初始化，再用 _timer
+        # 模型相关句柄：load_model() 之后才会被填充。
+        self.Inference = None
+        self.load_image = None
+        self.inference = None
+        self._model_loaded = False
+
+        # Timing 状态本身是轻量 Python dict，不涉及 GPU。
         self.init_timings = {}
         self.total_timings = {}
 
-        _repo_root = os.path.abspath(self.sam3d_root)
+    def _configure_python_paths(self):
+        """配置 SAM3D 仓库导入路径；只修改 sys.path，不加载模型。"""
         try:
-            sys.path.remove(_repo_root)
+            sys.path.remove(self._repo_root)
         except ValueError:
             pass
-        sys.path.insert(0, _repo_root)
+        sys.path.insert(0, self._repo_root)
 
-        notebook_dir = os.path.join(self.sam3d_root, "notebook")
-        if notebook_dir not in sys.path:
-            sys.path.append(notebook_dir)
+        if self._notebook_dir not in sys.path:
+            sys.path.append(self._notebook_dir)
 
-        with self._timer("init/load_sam3d_model"):
+    # ============================================================
+    # Part 2 / 模型加载：只在这里导入 Inference 并加载权重
+    # ============================================================
+    def load_model(self, force_reload=False):
+        """
+        加载 SAM3D 模型和权重。
+
+        Args:
+            force_reload: True 时先 release() 当前模型，再重新加载。
+
+        Returns:
+            self.inference: SAM3D Inference 实例。
+        """
+        if self._model_loaded and self.inference is not None and not force_reload:
+            return self.inference
+
+        if force_reload:
+            self.release(clear_imports=False, reset_timings=False)
+
+        self._configure_python_paths()
+
+        with self._timer("load_model/load_sam3d_model"):
             from inference import Inference, load_image  # noqa: E402
 
             self.Inference = Inference
             self.load_image = load_image
             self.inference = self.Inference(self.sam3d_config, compile=self.sam_compile)
+            self._model_loaded = True
+
+        return self.inference
+
+    @property
+    def model_loaded(self):
+        return bool(self._model_loaded and self.inference is not None)
+
+    def _ensure_model_loaded(self):
+        if not self.model_loaded:
+            self.load_model(force_reload=False)
 
     # ============================================================
-    # Timer helpers
+    # Part 3 / 前向推理与重建：原 recon 流程及其全部辅助函数
     # ============================================================
+    # Timer helpers
     @contextmanager
     def _timer(self, name):
         start = time.perf_counter()
@@ -123,21 +173,36 @@ class SAM3DReconstructor:
         return (mask > 0).astype(np.uint8)
 
     def run_sam3d(self, rgb_path, mask_path, save_path, seed=42):
+        """运行 SAM3D 前向推理并保存原始点云。
+
+        为保持原有调用兼容性，如果用户没有显式调用 load_model()，
+        这里会在真正需要 SAM3D 推理时自动加载模型。
+        """
+        self._ensure_model_loaded()
+
         image = self.load_image(rgb_path)
         mask = self.load_mask(mask_path)
+        output = None
         try:
-            from sam3d_objects.model.backbone.tdfy_dit.modules.attention.ca_cache import (
-                cross_attn_kv_cache,
-            )
-            ca_ctx = cross_attn_kv_cache(self.inference._pipeline, verbose=self.verbose)
-        except Exception:
-            from contextlib import nullcontext
-            ca_ctx = nullcontext()
+            try:
+                from sam3d_objects.model.backbone.tdfy_dit.modules.attention.ca_cache import (
+                    cross_attn_kv_cache,
+                )
+                ca_ctx = cross_attn_kv_cache(self.inference._pipeline, verbose=self.verbose)
+            except Exception:
+                from contextlib import nullcontext
+                ca_ctx = nullcontext()
 
-        with ca_ctx:
-            output = self.inference(image, mask, seed=seed)
-        output["gs"].save_ply(save_path)
-        return save_path
+            with ca_ctx:
+                output = self.inference(image, mask, seed=seed)
+            output["gs"].save_ply(save_path)
+            return save_path
+        finally:
+            # 避免前向推理输出中的临时 GPU/CPU 引用滞留到函数外。
+            del image
+            del mask
+            if output is not None:
+                del output
 
     @staticmethod
     def load_pcd(path):
@@ -1274,3 +1339,108 @@ class SAM3DReconstructor:
             "metrics": metrics_dict,
             "timings": self.total_timings.copy(),
         }
+
+    # ============================================================
+    # Part 4 / 释放函数：释放模型权重、临时引用和 CUDA cache
+    # ============================================================
+    @staticmethod
+    def _clear_cuda_cache(verbose=False):
+        """尽量清理 PyTorch CUDA cache；未安装 torch 或无 CUDA 时安全跳过。"""
+        cuda_cleared = False
+        try:
+            import torch  # noqa: WPS433
+
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.empty_cache()
+                    cuda_cleared = True
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+        except Exception as exc:
+            if verbose:
+                print(f"[Release] Skip torch CUDA cache cleanup: {exc}")
+        return cuda_cleared
+
+    def release(self, clear_imports=False, reset_timings=False):
+        """
+        释放 SAM3D 模型相关引用，并尽量让 GPU 处于最轻量状态。
+
+        Args:
+            clear_imports:
+                False：只删除 self 上的模型/函数引用，推荐默认值，之后可再次 load_model()。
+                True ：额外尝试从 sys.modules 移除 inference/sam3d_objects 模块，
+                       更激进，但如果同一进程其他代码正在使用这些模块，不建议开启。
+            reset_timings:
+                True 时同时清空 timing dict。
+
+        Returns:
+            dict: 释放动作摘要。
+        """
+        released = {
+            "had_model": bool(getattr(self, "inference", None) is not None),
+            "cleared_cuda_cache": False,
+            "cleared_imports": False,
+        }
+
+        if self.verbose:
+            print("[Release] Releasing SAM3D model references...")
+
+        # 1) 先断开实例上最重要的模型/权重引用。
+        if getattr(self, "inference", None) is not None:
+            try:
+                del self.inference
+            except Exception:
+                pass
+        self.inference = None
+        self._model_loaded = False
+
+        # 2) 断开类/函数引用，避免间接持有模块对象。
+        self.Inference = None
+        self.load_image = None
+
+        # 3) 可选：从 sys.modules 移除 SAM3D 相关模块，进一步释放模块级缓存。
+        #    默认不做，避免影响同进程其他代码。
+        if clear_imports:
+            for name in list(sys.modules.keys()):
+                if name == "inference" or name.startswith("sam3d_objects"):
+                    sys.modules.pop(name, None)
+            released["cleared_imports"] = True
+
+        # 4) Python GC + PyTorch CUDA cache 清理。
+        gc.collect()
+        released["cleared_cuda_cache"] = self._clear_cuda_cache(verbose=self.verbose)
+        gc.collect()
+
+        if reset_timings:
+            self.init_timings = {}
+            self.total_timings = {}
+
+        if self.verbose:
+            print("[Release] Done.")
+        return released
+
+    def close(self):
+        """release() 的轻量别名，便于 with/手动生命周期管理。"""
+        return self.release(clear_imports=False, reset_timings=False)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release(clear_imports=False, reset_timings=False)
+        return False
+
+    def __del__(self):
+        try:
+            self.release(clear_imports=False, reset_timings=False)
+        except Exception:
+            pass
+

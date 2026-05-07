@@ -7,9 +7,9 @@ from sam3D_class_V1 import SAM3DReconstructor
 # ============================================================
 # Input paths
 # ============================================================
-RGB_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302.jpg"
-DEPTH_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302_depth.png"
-MASK_PATH = "/home/dct/work/sam-3d-objects/test_data/1776255100302.png"
+RGB_PATH = "/mnt/dct/data/replay/shampoo/images/77.png"
+DEPTH_PATH = "/mnt/dct/data/replay/shampoo/depths/77.png"
+MASK_PATH = "/mnt/dct/data/replay/shampoo/masks/maskdata/77.png"
 K_INPUT = [
     384.897491455078, 0.0, 326.897308349609,
     0.0, 384.471374511719, 240.425384521484,
@@ -42,7 +42,7 @@ reconstructor = SAM3DReconstructor(
 # Run reconstruction
 # ============================================================
 
-this_out_dir = os.path.join(SAM3D_ROOT, "Outputs", "ice_tea_output") # 输出目录示例，这里改成了 pejoy_output/case_001，避免和之前的 cookie_output 混淆，实际使用时可以改成任意路径
+this_out_dir = os.path.join(SAM3D_ROOT, "Outputs", "Shampoo_output") # 输出目录示例，这里改成了 pejoy_output/case_001，避免和之前的 cookie_output 混淆，实际使用时可以改成任意路径
 
 result = reconstructor.recon(
     rgb_path=RGB_PATH,

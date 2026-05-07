@@ -256,7 +256,7 @@ def normalized_gaussian(scene_gs, in_place=False, outlier_percentile=None):
     return scene_gs
 
 
-def make_scene(*outputs, in_place=False):
+def make_scene(*outputs, in_place=False): # 这个函数的作用是将多个输出的高斯体合并成一个场景高斯体，主要步骤包括坐标变换、尺度调整和合并
     if not in_place:
         outputs = [deepcopy(output) for output in outputs]
 

@@ -1,2 +1,7 @@
 __pycache__
 sam3d-obj.tar.gz
+# Reconstruction outputs
+Outputs/
+*.ply
+*.obj
+*.npy

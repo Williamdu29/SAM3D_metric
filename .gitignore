@@ -1,7 +1,33 @@
-__pycache__
-sam3d-obj.tar.gz
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+build.log
+
 # Reconstruction outputs
 Outputs/
+Outputs_*/
+soda_cookie_output/
+result/
+*_output/
+service_outputs/
+
+# 3D / point cloud / generated model outputs
 *.ply
 *.obj
+*.glb
 *.npy
+
+# Temporary files
+*.tmp
+*.temp

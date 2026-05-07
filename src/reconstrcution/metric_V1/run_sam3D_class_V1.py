@@ -19,7 +19,8 @@ K_INPUT = [
 # ============================================================
 # Config
 # ============================================================
-SAM3D_ROOT = "/home/dct/work/sam-3d-objects"
+PROJECT_ROOT = "/home/dct/work/sam-3d-objects"
+SAM3D_ROOT = "/home/dct/work/sam-3d-objects/libs/SAM3D"
 SAM3D_CONFIG = "/home/user/datas/hc/data/ckpts/sam3d-obj/models/checkpoints/pipeline.yaml"
 # OUT_DIR = os.path.join(SAM3D_ROOT, "cookie_output")
 
@@ -42,7 +43,7 @@ reconstructor = SAM3DReconstructor(
 # Run reconstruction
 # ============================================================
 
-this_out_dir = os.path.join(SAM3D_ROOT, "Outputs", "Shampoo_output") # 输出目录示例，这里改成了 pejoy_output/case_001，避免和之前的 cookie_output 混淆，实际使用时可以改成任意路径
+this_out_dir = os.path.join(PROJECT_ROOT, "result/Outputs_V1", "ice_tea_output") # 输出目录示例，这里改成了 pejoy_output/case_001，避免和之前的 cookie_output 混淆，实际使用时可以改成任意路径
 
 result = reconstructor.recon(
     rgb_path=RGB_PATH,

@@ -18,6 +18,41 @@ import numpy as np
 from flask import Flask, jsonify, request
 
 
+
+'''
+本地的 SAM3DReconstructor 类封装成一个 HTTP 服务。核心模型/算法逻辑不在这个文件里，而是动态从：
+
+src/reconstrcution/metric_V1/sam3D_class_V1.py
+
+导入 SAM3DReconstructor。这个 Flask 服务主要负责：
+
+启动服务；
+加载配置、日志、环境变量；
+创建并保存 SAM3DReconstructor 实例；
+接收 HTTP JSON 请求；
+校验输入图片、深度图、mask、相机内参；
+调用 reconstructor.load_model()、reconstructor.recon()、reconstructor.release()；
+把结果统一包装成 JSON 返回
+'''
+
+
+
+_PROJECT_ROOT_BOOTSTRAP = Path(
+    os.environ.get(
+        "SAM3D_PROJECT_ROOT",
+        Path(__file__).resolve().parents[2],
+    )
+).expanduser().resolve()
+
+_SRC_ROOT_BOOTSTRAP = _PROJECT_ROOT_BOOTSTRAP / "src"
+
+if str(_SRC_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT_BOOTSTRAP))
+
+from utils.config import load_config
+from utils.logger import bridge_external_logs, create_logger, logger
+
+
 LOG_VALUE_PREVIEW_LIMIT = 160
 LOG_BODY_PREVIEW_LIMIT = 600
 IMAGE_FIELD_NAMES = {
@@ -49,7 +84,7 @@ class PayloadValidationError(ValueError):
 class InputFileNotFoundError(FileNotFoundError):
     """Raised when a user-provided input path does not exist."""
 
-
+'''
 def _setup_logger() -> logging.Logger:
     logger = logging.getLogger("sam3d_reconstruction_service")
     if logger.handlers:
@@ -64,9 +99,12 @@ def _setup_logger() -> logging.Logger:
     )
     logger.addHandler(handler)
     return logger
+'''
 
 
+'''
 logger = _setup_logger()
+'''
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:
@@ -415,7 +453,17 @@ def _load_reconstructor_class(project_root: Path):
 
 
 def create_app() -> Flask:
+
     project_root = _resolve_project_root()
+
+    config = load_config(project_root / "config.yaml")
+    project_logger = create_logger(
+        config,
+        module_name=Path(__file__).stem,
+    )
+
+    logger.info(f"Project logger initialized, log_path={project_logger.log_path}")
+
     sam3d_root = Path(os.environ.get("SAM3D_ROOT", str(project_root / "libs" / "SAM3D"))).expanduser().resolve()
     sam3d_config = os.environ.get(
         "SAM3D_CONFIG",
@@ -453,6 +501,7 @@ def create_app() -> Flask:
 
     app = Flask(__name__)
     app.config["PROJECT_ROOT"] = str(project_root)
+    app.config["PROJECT_LOGGER"] = project_logger
     app.config["SAM3D_ROOT"] = str(sam3d_root)
     app.config["SAM3D_CONFIG"] = sam3d_config
     app.config["OUTPUT_ROOT"] = str(output_root)
@@ -486,10 +535,11 @@ def create_app() -> Flask:
         start_time = time.perf_counter()
         try:
             with app.config["RECON_LOCK"]:
-                app.config["RECONSTRUCTOR"].load_model(force_reload=force_reload) # 调用了 SAM3DReconstructor 类的 load_model 方法加载模型，加载后会将模型保存在类实例的属性中，供后续重建调用使用
+                with bridge_external_logs(app.config["PROJECT_LOGGER"]):
+                    app.config["RECONSTRUCTOR"].load_model(force_reload=force_reload) # 调用了 SAM3DReconstructor 类的 load_model 方法加载模型，加载后会将模型保存在类实例的属性中，供后续重建调用使用
         except Exception as exc:
-            traceback.print_exc()
             logger.error(f"/load_model failed: task_id={task_id}, reason={exc}")
+            logger.error(traceback.format_exc())
             return _json_response(
                 task_id,
                 RECON_CODE_MODEL_LOAD_FAILED,
@@ -513,14 +563,15 @@ def create_app() -> Flask:
         reset_timings = _parse_bool(raw_payload.get("reset_timings"), "reset_timings", default=False)
         try:
             with app.config["RECON_LOCK"]:
-                release_result = app.config["RECONSTRUCTOR"].release(
-                    clear_imports=clear_imports,
-                    reset_timings=reset_timings,
-                )
-                gc.collect()
+                with bridge_external_logs(app.config["PROJECT_LOGGER"]):
+                    release_result = app.config["RECONSTRUCTOR"].release(
+                        clear_imports=clear_imports,
+                        reset_timings=reset_timings,
+                    )
+                    gc.collect()
         except Exception as exc:
-            traceback.print_exc()
             logger.error(f"/release failed: task_id={task_id}, reason={exc}")
+            logger.error(traceback.format_exc())
             return _json_response(
                 task_id,
                 RECON_CODE_INTERNAL_ERROR,
@@ -581,30 +632,31 @@ def create_app() -> Flask:
 
             try:
                 with app.config["RECON_LOCK"]:
-                    result = app.config["RECONSTRUCTOR"].recon( # 调用了类的 recon 方法进行重建，传入了之前解析的输入参数，重建完成后会返回一个包含各种输出路径和指标的结果字典
-                        rgb_path=parsed["rgb_path"],
-                        depth_path=parsed["depth_path"],
-                        mask_path=parsed["mask_path"],
-                        k_input=parsed["k_input"],
-                        out_dir=out_dir,
-                        run_sam3d=parsed["run_sam3d"],
-                        output_prefix=parsed["output_prefix"],
-                        raw_sam_name=parsed["raw_sam_name"],
-                        anchor_name=parsed["anchor_name"],
-                        save_metrics_npy=parsed["save_metrics_npy"],
-                        save_metrics_json=parsed["save_metrics_json"],
-                        seed=parsed["seed"],
-                    )
-                    if parsed["release_after_recon"]:
-                        release_result = app.config["RECONSTRUCTOR"].release(
-                            clear_imports=False,
-                            reset_timings=False,
+                    with bridge_external_logs(app.config["PROJECT_LOGGER"]):
+                        result = app.config["RECONSTRUCTOR"].recon( # 调用了类的 recon 方法进行重建，传入了之前解析的输入参数，重建完成后会返回一个包含各种输出路径和指标的结果字典
+                            rgb_path=parsed["rgb_path"],
+                            depth_path=parsed["depth_path"],
+                            mask_path=parsed["mask_path"],
+                            k_input=parsed["k_input"],
+                            out_dir=out_dir,
+                            run_sam3d=parsed["run_sam3d"],
+                            output_prefix=parsed["output_prefix"],
+                            raw_sam_name=parsed["raw_sam_name"],
+                            anchor_name=parsed["anchor_name"],
+                            save_metrics_npy=parsed["save_metrics_npy"],
+                            save_metrics_json=parsed["save_metrics_json"],
+                            seed=parsed["seed"],
                         )
-                    else:
-                        release_result = None
+                        if parsed["release_after_recon"]:
+                            release_result = app.config["RECONSTRUCTOR"].release(
+                                clear_imports=False,
+                                reset_timings=False,
+                            )
+                        else:
+                            release_result = None
             except Exception as exc:
-                traceback.print_exc()
                 logger.error(f"/reconstruct failed: task_id={task_id}, reason={exc}")
+                logger.error(traceback.format_exc())
                 return _json_response(
                     task_id,
                     RECON_CODE_INTERNAL_ERROR,
@@ -616,6 +668,7 @@ def create_app() -> Flask:
         response_result = _make_json_safe(result)
         response_result["elapsed_seconds"] = elapsed
         response_result["release_after_recon"] = bool(parsed["release_after_recon"])
+        response_result["log_path"] = str(app.config["PROJECT_LOGGER"].log_path)
         if release_result is not None:
             response_result["release_result"] = _make_json_safe(release_result)
 

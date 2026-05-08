@@ -1,0 +1,8 @@
+logger:
+  level: INFO
+  output_console: false
+  output_log: true
+  output_log_color: false
+
+paths:
+  logs_dir: /home/dct/work/sam-3d-objects/logs

@@ -30,3 +30,5 @@ build.log
 __pycache__/
 .DS_Store
 EOF
+logs/
+*.log

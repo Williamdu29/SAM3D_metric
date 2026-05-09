@@ -1,0 +1,95 @@
+services:
+  sam3d-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      network: host
+      args:
+        USER_ID: ${HOST_UID:-1000}
+        GROUP_ID: ${HOST_GID:-1000}
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-7.5;8.0;8.6;8.9;9.0}
+
+    image: sam3d-api:cu121
+    container_name: sam3d-api
+
+    working_dir: /workspace
+
+    volumes:
+      # 挂载整个项目仓库：
+      # 宿主机 ~/work/sam-3d-objects -> 容器 /workspace
+      - type: bind
+        source: ..
+        target: /workspace
+
+      # 让 /opt/SAM3D 指向你当前仓库里的 SAM3D 官方源码
+      - type: bind
+        source: ../libs/SAM3D
+        target: /opt/SAM3D
+
+      # 缓存 HuggingFace / Torch，避免重复下载
+      - sam3d_hf_cache:/cache/huggingface
+      - sam3d_torch_cache:/cache/torch
+
+    ports:
+      # 宿主机 5000 -> 容器 5000
+      # 之后你用 curl http://localhost:5000/health 测试
+      - "5000:5000"
+
+    environment:
+      # 项目路径
+      SAM3D_PROJECT_ROOT: /workspace
+
+      # SAM3D 官方源码路径
+      SAM3D_ROOT: /workspace/libs/SAM3D
+
+      # Flask 监听配置
+      SAM3D_SERVICE_HOST: 0.0.0.0
+      SAM3D_SERVICE_PORT: "5000"
+
+      # 你的 pipeline.yaml 在宿主机 checkpoints/pipeline.yaml
+      # 容器内对应 /workspace/checkpoints/pipeline.yaml
+      SAM3D_CONFIG: /workspace/checkpoints/pipeline.yaml
+      SAM3D_CHECKPOINT_DIR: /workspace/checkpoints
+
+      # 输出目录
+      SAM3D_OUTPUT_ROOT: /workspace/Outputs/service_outputs
+
+      # Python import 路径
+      PYTHONPATH: /workspace:/workspace/src:/workspace/libs/SAM3D:/opt/SAM3D
+
+      # 缓存目录
+      HF_HOME: /cache/huggingface
+      TORCH_HOME: /cache/torch
+
+      # 默认不在启动时预加载模型，先让服务快速起来，再手动调用 /load_model
+      SAM3D_PRELOAD_MODEL: "0"
+
+      # 根据你代码里的环境变量接口设置
+      SAM3D_RELEASE_AFTER_RECON: "0"
+      SAM3D_COMPILE_MODEL: "0"
+      SAM3D_VERBOSE: "1"
+      SAM3D_VOXEL_SIZE: "0.003"
+      SAM3D_ICP_MAX_ITER: "40"
+      SAM3D_MESH_POISSON_DEPTH: "8"
+      SAM3D_MESH_DENSITY_Q: "0.02"
+
+      # NVIDIA runtime 环境
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+    shm_size: "16gb"
+    ipc: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    command: ["python", "-u", "src/service/run_sam3d_service.py"]
+
+volumes:
+  sam3d_hf_cache:
+  sam3d_torch_cache:

@@ -18,6 +18,7 @@ soda_cookie_output/
 result/
 notebook/meshes/
 *_output/
+checkpoints/
 
 # Generated 3D/model outputs
 *.ply

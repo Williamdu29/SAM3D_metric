@@ -465,10 +465,26 @@ def create_app() -> Flask:
     logger.info(f"Project logger initialized, log_path={project_logger.log_path}")
 
     sam3d_root = Path(os.environ.get("SAM3D_ROOT", str(project_root / "libs" / "SAM3D"))).expanduser().resolve()
-    sam3d_config = os.environ.get(
-        "SAM3D_CONFIG",
-        "/home/user/datas/hc/data/ckpts/sam3d-obj/models/checkpoints/pipeline.yaml",
-    ).strip()
+    sam3d_config_env = os.environ.get("SAM3D_CONFIG", "").strip()
+
+    if sam3d_config_env:
+        sam3d_config = str(Path(sam3d_config_env).expanduser().resolve())
+    else:
+        checkpoint_candidates = [
+            project_root / "checkpoints" / "pipeline.yaml",
+            project_root / "checkpoints" / "hf" / "pipeline.yaml",
+        ]
+        existing_checkpoint = next((path for path in checkpoint_candidates if path.is_file()), None)
+
+        if existing_checkpoint is None:
+            raise RuntimeError(
+                "Cannot find SAM3D pipeline.yaml. Tried: "
+                + ", ".join(str(path) for path in checkpoint_candidates)
+                + ". You can also set SAM3D_CONFIG=/workspace/checkpoints/xxx/pipeline.yaml"
+            )
+
+        sam3d_config = str(existing_checkpoint)
+        
     output_root = Path(os.environ.get("SAM3D_OUTPUT_ROOT", str(project_root / "Outputs" / "service_outputs"))).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 

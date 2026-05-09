@@ -1,0 +1,50 @@
+.git
+.gitignore
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+conda/
+*.egg-info/
+
+.DS_Store
+.idea/
+.vscode/
+
+logs/
+tmp/
+temp/
+outputs/
+output/
+runs/
+
+# 权重和 checkpoint 不打进镜像，运行时通过 volume 挂载
+checkpoints/
+
+# 常见大文件输出
+*.ply
+*.obj
+*.glb
+*.gltf
+*.npz
+*.npy
+*.pth
+*.pt
+*.ckpt
+
+# 保留 Docker 部署文件
+!docker/
+!docker/**
+
+# 保留官方 SAM3D 源码，构建环境时需要
+!libs/
+!libs/SAM3D/
+!libs/SAM3D/**

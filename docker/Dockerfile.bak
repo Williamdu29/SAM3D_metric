@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1.7
+
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0"
+
+ENV TZ=Etc/UTC \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    PATH=/opt/conda/bin:/opt/conda/envs/sam3d-objects/bin:$PATH \
+    CUDA_HOME=/usr/local/cuda \
+    FORCE_CUDA=1 \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu121" \
+    PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    ninja-build \
+    pkg-config \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    libegl1 \
+    libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+    | tar -xj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+WORKDIR /opt/SAM3D
+
+COPY libs/SAM3D/ /opt/SAM3D/
+
+RUN micromamba env create -y -f /opt/SAM3D/environments/default.yml \
+    && micromamba clean -a -y
+
+SHELL ["micromamba", "run", "-n", "sam3d-objects", "/bin/bash", "-lc"]
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -e '.[dev]' \
+    && pip install -e '.[p3d]' \
+    && pip install -e '.[inference]' \
+    && chmod +x ./patching/hydra \
+    && ./patching/hydra
+
+SHELL ["/bin/bash", "-lc"]
+
+COPY docker/entrypoint.sh /opt/entrypoint.sh
+
+RUN chmod +x /opt/entrypoint.sh \
+    && groupadd -g ${GROUP_ID} appuser \
+    && useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash appuser \
+    && mkdir -p /workspace /cache/huggingface /cache/torch \
+    && chown -R appuser:appuser /workspace /cache /opt/entrypoint.sh
+
+USER appuser
+WORKDIR /workspace
+
+ENV HF_HOME=/cache/huggingface \
+    TORCH_HOME=/cache/torch \
+    PYTHONPATH=/workspace:/workspace/src:/workspace/libs/SAM3D:/opt/SAM3D
+
+EXPOSE 5000
+
+ENTRYPOINT ["/opt/entrypoint.sh"]
+
+CMD ["python", "-u", "src/service/run_sam3d_service.py"]

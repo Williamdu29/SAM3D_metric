@@ -1,0 +1,8 @@
+{
+  "step1/build_anchor_data": 0.02809640998020768,
+  "step2/run_or_load_sam3d": 10.077481884974986,
+  "step3/search_metric_alignment": 13.031116098165512,
+  "step4/save_metric_pointclouds": 0.009595006238669157,
+  "step5/reconstruct_metric_mesh": 43.60832733241841,
+  "step6/save_metrics": 0.1156410132534802
+}

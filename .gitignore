@@ -33,3 +33,7 @@ __pycache__/
 EOF
 logs/
 *.log
+
+# Allow outputs/ directory (sample model outputs for reference)
+!outputs/
+!outputs/**

@@ -52,7 +52,7 @@ RGB Image + Depth Map + Object Mask + Camera Intrinsics K
 
 | RGB | Mask | Depth |
 |:---:|:----:|:-----:|
-| ![RGB](test_data/images/77.png) | ![Mask](test_data/mask/77.png) | ![Depth](test_data/depth/77.png) |
+| ![RGB](test_data/images/77.png) | ![Mask](test_data/mask/77.png) | ![Depth](test_data/depth/77_colorized.png) |
 
 ### V2: Native Mesh Alignment (textured)
 
